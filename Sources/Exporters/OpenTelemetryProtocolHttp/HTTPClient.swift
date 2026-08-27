@@ -49,13 +49,26 @@ extension HTTPClient {
   /// Sends a request via the completion-handler API and blocks until a response or timeout.
   func sendReturningResultSync(request: URLRequest,
                                timeout: TimeInterval) -> HTTPClientSyncSendOutcome {
-    let semaphore = DispatchSemaphore(value: 0)
-    nonisolated(unsafe) var sendResult: Result<HTTPURLResponse, Error>?
-    send(request: request) { result in
-      sendResult = result
-      semaphore.signal()
-    }
+    let wait = HTTPClientSyncWait()
+    send(request: request) { wait.complete(with: $0) }
+    return wait.outcome(timeout: timeout)
+  }
+}
+
+private final class HTTPClientSyncWait: @unchecked Sendable {
+  private var sendResult: Result<HTTPURLResponse, Error>?
+  private let semaphore = DispatchSemaphore(value: 0)
+  private var timedOut = false
+
+  func complete(with result: Result<HTTPURLResponse, Error>) {
+    guard !timedOut else { return }
+    sendResult = result
+    semaphore.signal()
+  }
+
+  func outcome(timeout: TimeInterval) -> HTTPClientSyncSendOutcome {
     if semaphore.wait(timeout: .now() + timeout) == .timedOut {
+      timedOut = true
       return .timedOut
     }
     switch sendResult {
