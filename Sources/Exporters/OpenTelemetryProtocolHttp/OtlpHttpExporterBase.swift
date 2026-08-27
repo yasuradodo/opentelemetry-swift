@@ -155,6 +155,21 @@ public class OtlpHttpExporterBase<Signal: Sendable>: @unchecked Sendable {
     }
   }
 
+  func performExportSend(_ request: URLRequest) async -> Result<HTTPURLResponse, Error> {
+    do {
+      return .success(try await httpClient.send(request: request))
+    } catch {
+      return .failure(error)
+    }
+  }
+
+  func performExportSendSync(_ request: URLRequest,
+                             timeout: TimeInterval) -> Result<HTTPURLResponse, Error> {
+    let wait = ExportSendWait()
+    httpClient.send(request: request) { wait.complete(with: $0) }
+    return wait.result(timeout: timeout)
+  }
+
   func performPendingFlushSync(
     explicitTimeout: TimeInterval?,
     makeRequest: ([Signal]) -> URLRequest
@@ -164,15 +179,15 @@ public class OtlpHttpExporterBase<Signal: Sendable>: @unchecked Sendable {
 
     let request = makeRequest(sending)
     let timeout = exportTimeout(explicitTimeout: explicitTimeout)
-    switch httpClient.sendReturningResultSync(request: request, timeout: timeout) {
+    switch performExportSendSync(request, timeout: timeout) {
     case .success:
       exporterMetrics?.addSuccess(value: sending.count)
       return true
+    case .failure(is ExportSendWaitTimedOut):
+      recordFlushTimedOut(sending: sending)
+      return false
     case let .failure(error):
       recordFlushSendFailure(error, sending: sending)
-      return false
-    case .timedOut:
-      recordFlushTimedOut(sending: sending)
       return false
     }
   }
@@ -185,13 +200,43 @@ public class OtlpHttpExporterBase<Signal: Sendable>: @unchecked Sendable {
     guard !sending.isEmpty else { return true }
 
     let request = makeRequest(sending)
-    switch await httpClient.sendReturningResult(request: request) {
+    switch await performExportSend(request) {
     case .success:
       exporterMetrics?.addSuccess(value: sending.count)
       return true
     case let .failure(error):
       recordFlushSendFailure(error, sending: sending)
       return false
+    }
+  }
+}
+
+/// Error returned when a blocking export send wait expires before ``HTTPClient`` invokes its completion handler.
+struct ExportSendWaitTimedOut: Error {}
+
+private final class ExportSendWait: @unchecked Sendable {
+  private var sendResult: Result<HTTPURLResponse, Error>?
+  private let semaphore = DispatchSemaphore(value: 0)
+  private var timedOut = false
+
+  func complete(with result: Result<HTTPURLResponse, Error>) {
+    guard !timedOut else { return }
+    sendResult = result
+    semaphore.signal()
+  }
+
+  func result(timeout: TimeInterval) -> Result<HTTPURLResponse, Error> {
+    if semaphore.wait(timeout: .now() + timeout) == .timedOut {
+      timedOut = true
+      return .failure(ExportSendWaitTimedOut())
+    }
+    switch sendResult {
+    case let .success(response):
+      return .success(response)
+    case let .failure(error):
+      return .failure(error)
+    case .none:
+      return .failure(ExportSendWaitTimedOut())
     }
   }
 }

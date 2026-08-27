@@ -29,59 +29,6 @@ public protocol HTTPClient {
   func send(request: URLRequest) async throws -> HTTPURLResponse
 }
 
-/// Result of a blocking ``HTTPClient/send(request:completion:)`` call with an explicit wait timeout.
-enum HTTPClientSyncSendOutcome: Sendable {
-  case success
-  case failure(Error)
-  case timedOut
-}
-
-extension HTTPClient {
-  /// Sends a request asynchronously and maps the result to ``Result`` instead of throwing.
-  func sendReturningResult(request: URLRequest) async -> Result<HTTPURLResponse, Error> {
-    do {
-      return .success(try await send(request: request))
-    } catch {
-      return .failure(error)
-    }
-  }
-
-  /// Sends a request via the completion-handler API and blocks until a response or timeout.
-  func sendReturningResultSync(request: URLRequest,
-                               timeout: TimeInterval) -> HTTPClientSyncSendOutcome {
-    let wait = HTTPClientSyncWait()
-    send(request: request) { wait.complete(with: $0) }
-    return wait.outcome(timeout: timeout)
-  }
-}
-
-private final class HTTPClientSyncWait: @unchecked Sendable {
-  private var sendResult: Result<HTTPURLResponse, Error>?
-  private let semaphore = DispatchSemaphore(value: 0)
-  private var timedOut = false
-
-  func complete(with result: Result<HTTPURLResponse, Error>) {
-    guard !timedOut else { return }
-    sendResult = result
-    semaphore.signal()
-  }
-
-  func outcome(timeout: TimeInterval) -> HTTPClientSyncSendOutcome {
-    if semaphore.wait(timeout: .now() + timeout) == .timedOut {
-      timedOut = true
-      return .timedOut
-    }
-    switch sendResult {
-    case .success:
-      return .success
-    case let .failure(error):
-      return .failure(error)
-    case .none:
-      return .timedOut
-    }
-  }
-}
-
 /// Default implementation of HTTPClient using URLSession.
 public final class BaseHTTPClient: HTTPClient {
   private let session: URLSession

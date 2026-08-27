@@ -84,7 +84,7 @@ public class OtlpHttpLogExporter: OtlpHttpExporterBase<ReadableLogRecord>, LogRe
     let request = makeLogExportRequest(for: sendingLogRecords, explicitTimeout: explicitTimeout)
     
     exporterMetrics?.addSeen(value: sendingLogRecords.count)
-    switch await httpClient.sendReturningResult(request: request) {
+    switch await performExportSend(request) {
     case .success:
       exporterMetrics?.addSuccess(value: sendingLogRecords.count)
       return .success

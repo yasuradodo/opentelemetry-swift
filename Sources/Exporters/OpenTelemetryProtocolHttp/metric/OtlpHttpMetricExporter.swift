@@ -117,7 +117,7 @@ public class OtlpHttpMetricExporter: OtlpHttpExporterBase<MetricData>, MetricExp
     let request = makeMetricExportRequest(for: sendingMetrics, explicitTimeout: nil)
     
     exporterMetrics?.addSeen(value: sendingMetrics.count)
-    switch await httpClient.sendReturningResult(request: request) {
+    switch await performExportSend(request) {
     case .success:
       exporterMetrics?.addSuccess(value: sendingMetrics.count)
       return .success

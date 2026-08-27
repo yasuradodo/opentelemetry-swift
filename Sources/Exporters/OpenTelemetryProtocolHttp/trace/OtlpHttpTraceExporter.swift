@@ -60,18 +60,18 @@ public class OtlpHttpTraceExporter: OtlpHttpExporterBase<SpanData>, SpanExporter
     let timeout = exportTimeout(explicitTimeout: explicitTimeout)
 
     exporterMetrics?.addSeen(value: sendingSpans.count)
-    switch httpClient.sendReturningResultSync(request: request, timeout: timeout) {
+    switch performExportSendSync(request, timeout: timeout) {
     case .success:
       exporterMetrics?.addSuccess(value: sendingSpans.count)
       return .success
+    case .failure(is ExportSendWaitTimedOut):
+      recordSendTimedOut(sentCount: sendingSpans.count)
+      return .failure
     case let .failure(error):
       recordExportSendFailure(
         error,
         sending: sendingSpans,
         skipRequeueOnTimeout: false)
-      return .failure
-    case .timedOut:
-      recordSendTimedOut(sentCount: sendingSpans.count)
       return .failure
     }
   }
@@ -91,7 +91,7 @@ public class OtlpHttpTraceExporter: OtlpHttpExporterBase<SpanData>, SpanExporter
     let request = makeTraceExportRequest(for: sendingSpans, explicitTimeout: explicitTimeout)
 
     exporterMetrics?.addSeen(value: sendingSpans.count)
-    switch await httpClient.sendReturningResult(request: request) {
+    switch await performExportSend(request) {
     case .success:
       exporterMetrics?.addSuccess(value: sendingSpans.count)
       return .success
