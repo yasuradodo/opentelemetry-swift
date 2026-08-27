@@ -85,55 +85,36 @@ public class OtlpHttpMetricExporter: OtlpHttpExporterBase<MetricData>, MetricExp
   // MARK: - StableMetricsExporter
   
   public func export(metrics: [MetricData]) -> ExportResult {
-    let sendingMetrics = pendingExport.drain(adding: metrics)
-    let request = makeMetricExportRequest(for: sendingMetrics, explicitTimeout: nil)
-    
-    exporterMetrics?.addSeen(value: sendingMetrics.count)
-    httpClient.send(request: request) { [weak self] result in
-      guard let self else { return }
-      self.handleExportSendResult(
-        result,
-        sending: sendingMetrics,
-        skipRequeueOnTimeout: false)
-    }
-    
+    performExportFireAndForget(adding: metrics,
+                               explicitTimeout: nil,
+                               skipRequeueOnTimeout: false,
+                               makeRequest: makeMetricExportRequest)
     return .success
   }
-  
+
   public func flush() -> ExportResult {
-    performPendingFlushSync(
-      explicitTimeout: nil,
-      makeRequest: { makeMetricExportRequest(for: $0, explicitTimeout: nil) })
+    performFlushSync(explicitTimeout: nil,
+                     makeRequest: makeMetricExportRequest)
     ? .success
     : .failure
   }
-  
+
   public func shutdown() -> ExportResult {
     return .success
   }
-  
+
   public func export(metrics: [MetricData]) async -> ExportResult {
-    let sendingMetrics = pendingExport.drain(adding: metrics)
-    let request = makeMetricExportRequest(for: sendingMetrics, explicitTimeout: nil)
-    
-    exporterMetrics?.addSeen(value: sendingMetrics.count)
-    switch await performExportSend(request) {
-    case .success:
-      exporterMetrics?.addSuccess(value: sendingMetrics.count)
-      return .success
-    case let .failure(error):
-      recordExportSendFailure(
-        error,
-        sending: sendingMetrics,
-        skipRequeueOnTimeout: true)
-      return .failure
-    }
+    await performExportAsync(adding: metrics,
+                             explicitTimeout: nil,
+                             skipRequeueOnTimeout: true,
+                             makeRequest: makeMetricExportRequest)
+    ? .success
+    : .failure
   }
-  
+
   public func flush() async -> ExportResult {
-    await performPendingFlushAsync(
-      explicitTimeout: nil,
-      makeRequest: { makeMetricExportRequest(for: $0, explicitTimeout: nil) })
+    await performFlushAsync(explicitTimeout: nil,
+                            makeRequest: makeMetricExportRequest)
     ? .success
     : .failure
   }
@@ -161,8 +142,8 @@ public class OtlpHttpMetricExporter: OtlpHttpExporterBase<MetricData>, MetricExp
 }
 
 private extension OtlpHttpMetricExporter {
-  func makeMetricExportRequest(for metrics: [MetricData],
-                               explicitTimeout: TimeInterval? = nil) -> URLRequest {
+  func makeMetricExportRequest(_ metrics: [MetricData],
+                               explicitTimeout: TimeInterval?) -> URLRequest {
     let body =
     Opentelemetry_Proto_Collector_Metrics_V1_ExportMetricsServiceRequest.with {
       $0.resourceMetrics = MetricsAdapter.toProtoResourceMetrics(metricData: metrics)

@@ -170,10 +170,81 @@ public class OtlpHttpExporterBase<Signal: Sendable>: @unchecked Sendable {
     return wait.result(timeout: timeout)
   }
 
-  func performPendingFlushSync(
-    explicitTimeout: TimeInterval?,
-    makeRequest: ([Signal]) -> URLRequest
-  ) -> Bool {
+  func performExportFireAndForget(adding incoming: [Signal],
+                                  explicitTimeout: TimeInterval?,
+                                  skipRequeueOnTimeout: Bool,
+                                  makeRequest: ([Signal], TimeInterval?) -> URLRequest) {
+    let sending = pendingExport.drain(adding: incoming)
+    let request = makeRequest(sending, explicitTimeout)
+    exporterMetrics?.addSeen(value: sending.count)
+    httpClient.send(request: request) { [weak self] result in
+      guard let self else { return }
+      self.handleExportSendResult(
+        result,
+        sending: sending,
+        skipRequeueOnTimeout: skipRequeueOnTimeout)
+    }
+  }
+
+  func performExportSync(adding incoming: [Signal],
+                         explicitTimeout: TimeInterval?,
+                         makeRequest: ([Signal], TimeInterval?) -> URLRequest) -> Bool {
+    let sending = pendingExport.drain(adding: incoming)
+    let request = makeRequest(sending, explicitTimeout)
+    let timeout = exportTimeout(explicitTimeout: explicitTimeout)
+    exporterMetrics?.addSeen(value: sending.count)
+    switch performExportSendSync(request, timeout: timeout) {
+    case .success:
+      exporterMetrics?.addSuccess(value: sending.count)
+      return true
+    case .failure(is ExportSendWaitTimedOut):
+      recordSendTimedOut(sentCount: sending.count)
+      return false
+    case let .failure(error):
+      recordExportSendFailure(
+        error,
+        sending: sending,
+        skipRequeueOnTimeout: false)
+      return false
+    }
+  }
+
+  func performExportAsync(adding incoming: [Signal],
+                          explicitTimeout: TimeInterval?,
+                          skipRequeueOnTimeout: Bool,
+                          makeRequest: ([Signal], TimeInterval?) -> URLRequest) async -> Bool {
+    let sending = pendingExport.drain(adding: incoming)
+    let request = makeRequest(sending, explicitTimeout)
+    exporterMetrics?.addSeen(value: sending.count)
+    switch await performExportSend(request) {
+    case .success:
+      exporterMetrics?.addSuccess(value: sending.count)
+      return true
+    case let .failure(error):
+      recordExportSendFailure(
+        error,
+        sending: sending,
+        skipRequeueOnTimeout: skipRequeueOnTimeout)
+      return false
+    }
+  }
+
+  func performFlushSync(explicitTimeout: TimeInterval?,
+                        makeRequest: ([Signal], TimeInterval?) -> URLRequest) -> Bool {
+    performPendingFlushSync(explicitTimeout: explicitTimeout) { signals in
+      makeRequest(signals, explicitTimeout)
+    }
+  }
+
+  func performFlushAsync(explicitTimeout: TimeInterval?,
+                         makeRequest: ([Signal], TimeInterval?) -> URLRequest) async -> Bool {
+    await performPendingFlushAsync(explicitTimeout: explicitTimeout) { signals in
+      makeRequest(signals, explicitTimeout)
+    }
+  }
+
+  func performPendingFlushSync(explicitTimeout: TimeInterval?,
+                               makeRequest: ([Signal]) -> URLRequest) -> Bool {
     let sending = pendingExport.drain(adding: [])
     guard !sending.isEmpty else { return true }
 
@@ -192,10 +263,8 @@ public class OtlpHttpExporterBase<Signal: Sendable>: @unchecked Sendable {
     }
   }
 
-  func performPendingFlushAsync(
-    explicitTimeout: TimeInterval?,
-    makeRequest: ([Signal]) -> URLRequest
-  ) async -> Bool {
+  func performPendingFlushAsync(explicitTimeout: TimeInterval?,
+                                makeRequest: ([Signal]) -> URLRequest) async -> Bool {
     let sending = pendingExport.drain(adding: [])
     guard !sending.isEmpty else { return true }
 

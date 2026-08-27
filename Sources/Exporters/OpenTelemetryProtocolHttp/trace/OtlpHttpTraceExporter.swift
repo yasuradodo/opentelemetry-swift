@@ -55,59 +55,34 @@ public class OtlpHttpTraceExporter: OtlpHttpExporterBase<SpanData>, SpanExporter
 
   public func export(spans: [SpanData], explicitTimeout: TimeInterval? = nil)
   -> SpanExporterResultCode {
-    let sendingSpans = pendingExport.drain(adding: spans)
-    let request = makeTraceExportRequest(for: sendingSpans, explicitTimeout: explicitTimeout)
-    let timeout = exportTimeout(explicitTimeout: explicitTimeout)
-
-    exporterMetrics?.addSeen(value: sendingSpans.count)
-    switch performExportSendSync(request, timeout: timeout) {
-    case .success:
-      exporterMetrics?.addSuccess(value: sendingSpans.count)
-      return .success
-    case .failure(is ExportSendWaitTimedOut):
-      recordSendTimedOut(sentCount: sendingSpans.count)
-      return .failure
-    case let .failure(error):
-      recordExportSendFailure(
-        error,
-        sending: sendingSpans,
-        skipRequeueOnTimeout: false)
-      return .failure
-    }
+    performExportSync(adding: spans,
+                      explicitTimeout: explicitTimeout,
+                      makeRequest: makeTraceExportRequest)
+    ? .success
+    : .failure
   }
 
   public func flush(explicitTimeout: TimeInterval? = nil)
   -> SpanExporterResultCode {
-    performPendingFlushSync(
-      explicitTimeout: explicitTimeout,
-      makeRequest: { makeTraceExportRequest(for: $0, explicitTimeout: explicitTimeout) })
+    performFlushSync(explicitTimeout: explicitTimeout,
+                     makeRequest: makeTraceExportRequest)
     ? .success
     : .failure
   }
 
   public func export(spans: [SpanData], explicitTimeout: TimeInterval? = nil) async
   -> SpanExporterResultCode {
-    let sendingSpans = pendingExport.drain(adding: spans)
-    let request = makeTraceExportRequest(for: sendingSpans, explicitTimeout: explicitTimeout)
-
-    exporterMetrics?.addSeen(value: sendingSpans.count)
-    switch await performExportSend(request) {
-    case .success:
-      exporterMetrics?.addSuccess(value: sendingSpans.count)
-      return .success
-    case let .failure(error):
-      recordExportSendFailure(
-        error,
-        sending: sendingSpans,
-        skipRequeueOnTimeout: true)
-      return .failure
-    }
+    await performExportAsync(adding: spans,
+                             explicitTimeout: explicitTimeout,
+                             skipRequeueOnTimeout: true,
+                             makeRequest: makeTraceExportRequest)
+    ? .success
+    : .failure
   }
 
   public func flush(explicitTimeout: TimeInterval? = nil) async -> SpanExporterResultCode {
-    await performPendingFlushAsync(
-      explicitTimeout: explicitTimeout,
-      makeRequest: { makeTraceExportRequest(for: $0, explicitTimeout: explicitTimeout) })
+    await performFlushAsync(explicitTimeout: explicitTimeout,
+                            makeRequest: makeTraceExportRequest)
     ? .success
     : .failure
   }
@@ -118,7 +93,7 @@ public class OtlpHttpTraceExporter: OtlpHttpExporterBase<SpanData>, SpanExporter
 }
 
 private extension OtlpHttpTraceExporter {
-  func makeTraceExportRequest(for spans: [SpanData], explicitTimeout: TimeInterval?) -> URLRequest {
+  func makeTraceExportRequest(_ spans: [SpanData], explicitTimeout: TimeInterval?) -> URLRequest {
     let body =
     Opentelemetry_Proto_Collector_Trace_V1_ExportTraceServiceRequest.with {
       $0.resourceSpans = SpanAdapter.toProtoResourceSpans(spanDataList: spans)
