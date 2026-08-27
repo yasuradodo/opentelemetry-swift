@@ -7,19 +7,20 @@ import Foundation
 import OpenTelemetryProtocolExporterCommon
 import SwiftProtobuf
 #if canImport(FoundationNetworking)
-  import FoundationNetworking
+import FoundationNetworking
 #endif
 import OpenTelemetryApi
 
-@available(*, deprecated, renamed: "OtlpHttpExporterBase")
-public typealias StableOtlpHTTPExporterBase = OtlpHttpExporterBase
-
-public class OtlpHttpExporterBase: @unchecked Sendable {
+public class OtlpHttpExporterBase<Signal: Sendable>: @unchecked Sendable {
   let endpoint: URL
   let httpClient: HTTPClient
   let envVarHeaders: [(String, String)]?
   let config: OtlpConfiguration
   let requeueOnFailure: Bool
+  var exporterMetrics: ExporterMetrics?
+  let pendingExport = OtlpHttpPendingExportState<Signal>()
+
+  var pendingSnapshot: [Signal] { pendingExport.snapshot() }
 
   // MARK: - Init
 
@@ -71,24 +72,24 @@ public class OtlpHttpExporterBase: @unchecked Sendable {
 
       var compressedData = rawData
 
-      #if canImport(Compression)
-        switch config.compression {
-        case .gzip:
-          if let data = rawData.gzip() {
-            compressedData = data
-            request.setValue("gzip", forHTTPHeaderField: "Content-Encoding")
-          }
-
-        case .deflate:
-          if let data = rawData.deflate() {
-            compressedData = data
-            request.setValue("deflate", forHTTPHeaderField: "Content-Encoding")
-          }
-
-        case .none:
-          break
+#if canImport(Compression)
+      switch config.compression {
+      case .gzip:
+        if let data = rawData.gzip() {
+          compressedData = data
+          request.setValue("gzip", forHTTPHeaderField: "Content-Encoding")
         }
-      #endif
+
+      case .deflate:
+        if let data = rawData.deflate() {
+          compressedData = data
+          request.setValue("deflate", forHTTPHeaderField: "Content-Encoding")
+        }
+
+      case .none:
+        break
+      }
+#endif
 
       // Apply final data. Could be compressed or raw
       // but it doesn't matter here
@@ -100,4 +101,97 @@ public class OtlpHttpExporterBase: @unchecked Sendable {
   }
 
   public func shutdown(explicitTimeout: TimeInterval? = nil) {}
+
+  func exportTimeout(explicitTimeout: TimeInterval?) -> TimeInterval {
+    min(explicitTimeout ?? TimeInterval.greatestFiniteMagnitude, config.timeout)
+  }
+
+  func configureExporterMetrics(signalType: String, meterProvider: any MeterProvider) {
+    exporterMetrics = ExporterMetrics(
+      type: signalType,
+      meterProvider: meterProvider,
+      exporterName: "otlp",
+      transportName: config.exportAsJson
+      ? ExporterMetrics.TransporterType.httpJson
+      : ExporterMetrics.TransporterType.grpc)
+  }
+
+  func recordFlushSendFailure(_ error: Error, sending: [Signal]) {
+    exporterMetrics?.addFailed(value: sending.count)
+    pendingExport.requeue(sending)
+    OpenTelemetry.instance.feedbackHandler?("\(error)")
+  }
+
+  func recordFlushTimedOut(sending: [Signal]) {
+    exporterMetrics?.addFailed(value: sending.count)
+    pendingExport.requeue(sending)
+  }
+
+  func recordSendTimedOut(sentCount: Int) {
+    exporterMetrics?.addFailed(value: sentCount)
+  }
+
+  func recordExportSendFailure(_ error: Error,
+                               sending: [Signal],
+                               skipRequeueOnTimeout: Bool) {
+    exporterMetrics?.addFailed(value: sending.count)
+    if requeueOnFailure, !(skipRequeueOnTimeout && isHTTPClientTimeout(error)) {
+      pendingExport.requeue(sending)
+    }
+    OpenTelemetry.instance.feedbackHandler?("\(error)")
+  }
+
+  func handleExportSendResult(_ result: Result<HTTPURLResponse, Error>,
+                              sending: [Signal],
+                              skipRequeueOnTimeout: Bool) {
+    switch result {
+    case .success:
+      exporterMetrics?.addSuccess(value: sending.count)
+    case let .failure(error):
+      recordExportSendFailure(
+        error,
+        sending: sending,
+        skipRequeueOnTimeout: skipRequeueOnTimeout)
+    }
+  }
+
+  func performPendingFlushSync(
+    explicitTimeout: TimeInterval?,
+    makeRequest: ([Signal]) -> URLRequest
+  ) -> Bool {
+    let sending = pendingExport.drain(adding: [])
+    guard !sending.isEmpty else { return true }
+
+    let request = makeRequest(sending)
+    let timeout = exportTimeout(explicitTimeout: explicitTimeout)
+    switch httpClient.sendReturningResultSync(request: request, timeout: timeout) {
+    case .success:
+      exporterMetrics?.addSuccess(value: sending.count)
+      return true
+    case let .failure(error):
+      recordFlushSendFailure(error, sending: sending)
+      return false
+    case .timedOut:
+      recordFlushTimedOut(sending: sending)
+      return false
+    }
+  }
+
+  func performPendingFlushAsync(
+    explicitTimeout: TimeInterval?,
+    makeRequest: ([Signal]) -> URLRequest
+  ) async -> Bool {
+    let sending = pendingExport.drain(adding: [])
+    guard !sending.isEmpty else { return true }
+
+    let request = makeRequest(sending)
+    switch await httpClient.sendReturningResult(request: request) {
+    case .success:
+      exporterMetrics?.addSuccess(value: sending.count)
+      return true
+    case let .failure(error):
+      recordFlushSendFailure(error, sending: sending)
+      return false
+    }
+  }
 }

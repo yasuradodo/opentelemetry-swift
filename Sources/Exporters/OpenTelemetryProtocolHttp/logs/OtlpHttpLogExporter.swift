@@ -9,18 +9,16 @@ import OpenTelemetryProtocolExporterCommon
 import OpenTelemetrySdk
 
 #if canImport(FoundationNetworking)
-  import FoundationNetworking
+import FoundationNetworking
 #endif
 
 public func defaultOltpHttpLoggingEndpoint() -> URL {
   URL(string: "http://localhost:4318/v1/logs")!
 }
 
-public class OtlpHttpLogExporter: OtlpHttpExporterBase, LogRecordExporter, @unchecked Sendable {
-  var pendingLogRecords: [ReadableLogRecord] = []
-  private let exporterLock = Lock()
-  private var exporterMetrics: ExporterMetrics?
-
+public class OtlpHttpLogExporter: OtlpHttpExporterBase<ReadableLogRecord>, LogRecordExporter, @unchecked Sendable {
+  var pendingLogRecords: [ReadableLogRecord] { pendingSnapshot }
+  
   override public init(endpoint: URL = defaultOltpHttpLoggingEndpoint(),
                        config: OtlpConfiguration = OtlpConfiguration(),
                        httpClient: HTTPClient = BaseHTTPClient(),
@@ -32,7 +30,7 @@ public class OtlpHttpLogExporter: OtlpHttpExporterBase, LogRecordExporter, @unch
                envVarHeaders: envVarHeaders,
                requeueOnFailure: requeueOnFailure)
   }
-
+  
   /// A `convenience` constructor to provide support for exporter metric using`StableMeterProvider` type
   /// - Parameters:
   ///    - endpoint: Exporter endpoint injected as dependency
@@ -52,100 +50,75 @@ public class OtlpHttpLogExporter: OtlpHttpExporterBase, LogRecordExporter, @unch
               httpClient: httpClient,
               envVarHeaders: envVarHeaders,
               requeueOnFailure: requeueOnFailure)
-    exporterMetrics = ExporterMetrics(type: "log",
-                                      meterProvider: meterProvider,
-                                      exporterName: "otlp",
-                                      transportName: config.exportAsJson
-                                        ? ExporterMetrics.TransporterType.httpJson
-                                        : ExporterMetrics.TransporterType.grpc)
+    configureExporterMetrics(signalType: "log", meterProvider: meterProvider)
   }
-
+  
   public func export(logRecords: [OpenTelemetrySdk.ReadableLogRecord],
                      explicitTimeout: TimeInterval? = nil) -> OpenTelemetrySdk.ExportResult {
-    var sendingLogRecords: [ReadableLogRecord] = []
-    exporterLock.withLockVoid {
-      pendingLogRecords.append(contentsOf: logRecords)
-      sendingLogRecords = pendingLogRecords
-      pendingLogRecords = []
-    }
-
-    let body =
-      Opentelemetry_Proto_Collector_Logs_V1_ExportLogsServiceRequest.with { request in
-        request.resourceLogs = LogRecordAdapter.toProtoResourceRecordLog(
-          logRecordList: sendingLogRecords)
-      }
-
-    var request = createRequest(body: body, endpoint: endpoint)
+    let sendingLogRecords = pendingExport.drain(adding: logRecords)
+    let request = makeLogExportRequest(for: sendingLogRecords, explicitTimeout: explicitTimeout)
+    
     exporterMetrics?.addSeen(value: sendingLogRecords.count)
-    request.timeoutInterval = min(explicitTimeout ?? TimeInterval.greatestFiniteMagnitude, config.timeout)
     httpClient.send(request: request) { [weak self] result in
-      switch result {
-      case .success:
-        self?.exporterMetrics?.addSuccess(value: sendingLogRecords.count)
-      case let .failure(error):
-        self?.exporterMetrics?.addFailed(value: sendingLogRecords.count)
-        if self?.requeueOnFailure == true {
-          self?.exporterLock.withLockVoid {
-            self?.pendingLogRecords.append(contentsOf: sendingLogRecords)
-          }
-        }
-        OpenTelemetry.instance.feedbackHandler?("\(error)")
-      }
+      guard let self else { return }
+      self.handleExportSendResult(
+        result,
+        sending: sendingLogRecords,
+        skipRequeueOnTimeout: false)
     }
-
+    
     return .success
   }
-
+  
   public func forceFlush(explicitTimeout: TimeInterval? = nil) -> ExportResult {
-    flush(explicitTimeout: explicitTimeout)
+    performPendingFlushSync(
+      explicitTimeout: explicitTimeout,
+      makeRequest: { makeLogExportRequest(for: $0, explicitTimeout: explicitTimeout) })
+    ? .success
+    : .failure
   }
-
-  public func flush(explicitTimeout: TimeInterval? = nil) -> ExportResult {
-    var exporterResult: ExportResult = .success
-    var pendingLogRecords: [ReadableLogRecord] = []
-    exporterLock.withLockVoid {
-      pendingLogRecords = self.pendingLogRecords
+  
+  public func export(logRecords: [OpenTelemetrySdk.ReadableLogRecord],
+                     explicitTimeout: TimeInterval? = nil) async -> OpenTelemetrySdk.ExportResult {
+    let sendingLogRecords = pendingExport.drain(adding: logRecords)
+    let request = makeLogExportRequest(for: sendingLogRecords, explicitTimeout: explicitTimeout)
+    
+    exporterMetrics?.addSeen(value: sendingLogRecords.count)
+    switch await httpClient.sendReturningResult(request: request) {
+    case .success:
+      exporterMetrics?.addSuccess(value: sendingLogRecords.count)
+      return .success
+    case let .failure(error):
+      recordExportSendFailure(
+        error,
+        sending: sendingLogRecords,
+        skipRequeueOnTimeout: true)
+      return .failure
     }
+  }
+  
+  public func forceFlush(explicitTimeout: TimeInterval? = nil) async -> ExportResult {
+    await performPendingFlushAsync(
+      explicitTimeout: explicitTimeout,
+      makeRequest: { makeLogExportRequest(for: $0, explicitTimeout: explicitTimeout) })
+    ? .success
+    : .failure
+  }
+  
+  public func shutdown(explicitTimeout: TimeInterval? = nil) async {
+    super.shutdown(explicitTimeout: explicitTimeout)
+  }
+}
 
-    if !pendingLogRecords.isEmpty {
-      let sentCount = pendingLogRecords.count
-      let body =
-        Opentelemetry_Proto_Collector_Logs_V1_ExportLogsServiceRequest.with { request in
-          request.resourceLogs = LogRecordAdapter.toProtoResourceRecordLog(
-            logRecordList: pendingLogRecords)
-        }
-      let semaphore = DispatchSemaphore(value: 0)
-      var request = createRequest(body: body, endpoint: endpoint)
-      let timeout = min(explicitTimeout ?? TimeInterval.greatestFiniteMagnitude, config.timeout)
-      request.timeoutInterval = timeout
-      httpClient.send(request: request) { [weak self] result in
-        switch result {
-        case .success:
-          self?.exporterMetrics?.addSuccess(value: sentCount)
-          // Drop the records we successfully flushed from the pending queue.
-          // Remove only the `sentCount` oldest entries so any records that
-          // `export()` appended concurrently are preserved for the next flush.
-          self?.exporterLock.withLockVoid {
-            guard let self else { return }
-            let n = min(sentCount, self.pendingLogRecords.count)
-            self.pendingLogRecords.removeFirst(n)
-          }
-          exporterResult = ExportResult.success
-        case let .failure(error):
-          self?.exporterMetrics?.addFailed(value: sentCount)
-          OpenTelemetry.instance.feedbackHandler?("\(error)")
-          exporterResult = ExportResult.failure
-        }
-        semaphore.signal()
-      }
-
-      let waitResult = semaphore.wait(timeout: .now() + timeout)
-      if waitResult == .timedOut {
-        exporterMetrics?.addFailed(value: sentCount)
-        return .failure
-      }
+private extension OtlpHttpLogExporter {
+  func makeLogExportRequest(for logRecords: [ReadableLogRecord],
+                            explicitTimeout: TimeInterval?) -> URLRequest {
+    let body =
+    Opentelemetry_Proto_Collector_Logs_V1_ExportLogsServiceRequest.with { request in
+      request.resourceLogs = LogRecordAdapter.toProtoResourceRecordLog(logRecordList: logRecords)
     }
-
-    return exporterResult
+    var request = createRequest(body: body, endpoint: endpoint)
+    request.timeoutInterval = exportTimeout(explicitTimeout: explicitTimeout)
+    return request
   }
 }

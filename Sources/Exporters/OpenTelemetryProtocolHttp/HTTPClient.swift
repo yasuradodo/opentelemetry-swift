@@ -10,6 +10,9 @@ import Foundation
 #endif
 
 /// Protocol for sending HTTP requests, allowing custom implementations for authentication and other behaviors.
+///
+/// Implementations must honor ``URLRequest/timeoutInterval`` on every send. OTLP HTTP exporters set this
+/// from ``OtlpConfiguration/timeout`` and optional exporter `explicitTimeout` values.
 public protocol HTTPClient {
   /// Sends an HTTP request and calls the completion handler with the result.
   /// - Parameters:
@@ -19,9 +22,51 @@ public protocol HTTPClient {
             completion: @escaping (Result<HTTPURLResponse, Error>) -> Void)
 
   /// Sends an HTTP request and returns the response on success.
+  ///
+  /// Must fail when ``URLRequest/timeoutInterval`` elapses before a response is available.
   /// - Parameter request: The URLRequest to send
   /// - Returns: The HTTP response for successful (2xx) requests
   func send(request: URLRequest) async throws -> HTTPURLResponse
+}
+
+/// Result of a blocking ``HTTPClient/send(request:completion:)`` call with an explicit wait timeout.
+enum HTTPClientSyncSendOutcome: Sendable {
+  case success
+  case failure(Error)
+  case timedOut
+}
+
+extension HTTPClient {
+  /// Sends a request asynchronously and maps the result to ``Result`` instead of throwing.
+  func sendReturningResult(request: URLRequest) async -> Result<HTTPURLResponse, Error> {
+    do {
+      return .success(try await send(request: request))
+    } catch {
+      return .failure(error)
+    }
+  }
+
+  /// Sends a request via the completion-handler API and blocks until a response or timeout.
+  func sendReturningResultSync(request: URLRequest,
+                               timeout: TimeInterval) -> HTTPClientSyncSendOutcome {
+    let semaphore = DispatchSemaphore(value: 0)
+    nonisolated(unsafe) var sendResult: Result<HTTPURLResponse, Error>?
+    send(request: request) { result in
+      sendResult = result
+      semaphore.signal()
+    }
+    if semaphore.wait(timeout: .now() + timeout) == .timedOut {
+      return .timedOut
+    }
+    switch sendResult {
+    case .success:
+      return .success
+    case let .failure(error):
+      return .failure(error)
+    case .none:
+      return .timedOut
+    }
+  }
 }
 
 /// Default implementation of HTTPClient using URLSession.
@@ -72,7 +117,7 @@ struct HTTPClientError: Error, CustomStringConvertible {
 }
 
 /// Maps `URLSessionDataTask` response to `HTTPClient` response.
-func httpClientResult(for taskResult: (Data?, URLResponse?, Error?)) -> Result<HTTPURLResponse, Error> {
+private func httpClientResult(for taskResult: (Data?, URLResponse?, Error?)) -> Result<HTTPURLResponse, Error> {
   let (_, response, error) = taskResult
 
   if let error = error {
@@ -97,4 +142,8 @@ func httpClientResult(for taskResult: (Data?, URLResponse?, Error?)) -> Result<H
   }
 
   return .success(httpResponse)
+}
+
+func isHTTPClientTimeout(_ error: Error) -> Bool {
+  (error as? URLError)?.code == .timedOut
 }

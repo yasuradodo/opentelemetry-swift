@@ -9,7 +9,7 @@ import OpenTelemetryProtocolExporterCommon
 import OpenTelemetrySdk
 
 #if canImport(FoundationNetworking)
-  import FoundationNetworking
+import FoundationNetworking
 #endif
 
 public func defaultOtlpHttpMetricsEndpoint() -> URL {
@@ -27,33 +27,31 @@ public typealias StableOtlpHTTPMetricExporter = OtlpHttpMetricExporter
 @available(*, deprecated, renamed: "OtlpHttpMetricExporter")
 public typealias OtlpHTTPMetricExporter = OtlpHttpMetricExporter
 
-public class OtlpHttpMetricExporter: OtlpHttpExporterBase, MetricExporter, @unchecked Sendable {
+public class OtlpHttpMetricExporter: OtlpHttpExporterBase<MetricData>, MetricExporter, @unchecked Sendable {
   var aggregationTemporalitySelector: AggregationTemporalitySelector
   var defaultAggregationSelector: DefaultAggregationSelector
-
-  var pendingMetrics: [MetricData] = []
-  private let exporterLock = Lock()
-  private var exporterMetrics: ExporterMetrics?
-
+  
+  var pendingMetrics: [MetricData] { pendingSnapshot }
+  
   // MARK: - Init
-
+  
   public init(endpoint: URL, config: OtlpConfiguration = OtlpConfiguration(),
               aggregationTemporalitySelector: AggregationTemporalitySelector =
-                AggregationTemporality.alwaysCumulative(),
+              AggregationTemporality.alwaysCumulative(),
               defaultAggregationSelector: DefaultAggregationSelector = AggregationSelector.instance,
               httpClient: HTTPClient = BaseHTTPClient(),
               envVarHeaders: [(String, String)]? = EnvVarHeaders.attributes,
               requeueOnFailure: Bool = true) {
     self.aggregationTemporalitySelector = aggregationTemporalitySelector
     self.defaultAggregationSelector = defaultAggregationSelector
-
+    
     super.init(endpoint: endpoint,
                config: config,
                httpClient: httpClient,
                envVarHeaders: envVarHeaders,
                requeueOnFailure: requeueOnFailure)
   }
-
+  
   /// A `convenience` constructor to provide support for exporter metric using`StableMeterProvider` type
   /// - Parameters:
   ///    - endpoint: Exporter endpoint injected as dependency
@@ -68,9 +66,9 @@ public class OtlpHttpMetricExporter: OtlpHttpExporterBase, MetricExporter, @unch
                           config: OtlpConfiguration = OtlpConfiguration(),
                           meterProvider: any MeterProvider,
                           aggregationTemporalitySelector: AggregationTemporalitySelector =
-                            AggregationTemporality.alwaysCumulative(),
+                          AggregationTemporality.alwaysCumulative(),
                           defaultAggregationSelector: DefaultAggregationSelector = AggregationSelector
-                            .instance,
+    .instance,
                           httpClient: HTTPClient = BaseHTTPClient(),
                           envVarHeaders: [(String, String)]? = EnvVarHeaders.attributes,
                           requeueOnFailure: Bool = true) {
@@ -81,113 +79,96 @@ public class OtlpHttpMetricExporter: OtlpHttpExporterBase, MetricExporter, @unch
               httpClient: httpClient,
               envVarHeaders: envVarHeaders,
               requeueOnFailure: requeueOnFailure)
-    exporterMetrics = ExporterMetrics(type: "metric",
-                                      meterProvider: meterProvider,
-                                      exporterName: "otlp",
-                                      transportName: config.exportAsJson
-                                        ? ExporterMetrics.TransporterType.httpJson
-                                        : ExporterMetrics.TransporterType.grpc)
+    configureExporterMetrics(signalType: "metric", meterProvider: meterProvider)
   }
-
+  
   // MARK: - StableMetricsExporter
-
+  
   public func export(metrics: [MetricData]) -> ExportResult {
-    var sendingMetrics: [MetricData] = []
-    exporterLock.withLockVoid {
-      pendingMetrics.append(contentsOf: metrics)
-      sendingMetrics = pendingMetrics
-      pendingMetrics = []
-    }
-    let body =
-      Opentelemetry_Proto_Collector_Metrics_V1_ExportMetricsServiceRequest.with {
-        $0.resourceMetrics = MetricsAdapter.toProtoResourceMetrics(
-          metricData: sendingMetrics)
-      }
+    let sendingMetrics = pendingExport.drain(adding: metrics)
+    let request = makeMetricExportRequest(for: sendingMetrics, explicitTimeout: nil)
+    
     exporterMetrics?.addSeen(value: sendingMetrics.count)
-    var request = createRequest(body: body, endpoint: endpoint)
-    request.timeoutInterval = min(TimeInterval.greatestFiniteMagnitude, config.timeout)
     httpClient.send(request: request) { [weak self] result in
-      switch result {
-      case .success:
-        self?.exporterMetrics?.addSuccess(value: sendingMetrics.count)
-      case let .failure(error):
-        self?.exporterMetrics?.addFailed(value: sendingMetrics.count)
-        if self?.requeueOnFailure == true {
-          self?.exporterLock.withLockVoid {
-            self?.pendingMetrics.append(contentsOf: sendingMetrics)
-          }
-        }
-        OpenTelemetry.instance.feedbackHandler?("\(error)")
-      }
+      guard let self else { return }
+      self.handleExportSendResult(
+        result,
+        sending: sendingMetrics,
+        skipRequeueOnTimeout: false)
     }
-
+    
     return .success
   }
-
+  
   public func flush() -> ExportResult {
-    var exporterResult: ExportResult = .success
-    var pendingMetrics: [MetricData] = []
-    exporterLock.withLockVoid {
-      pendingMetrics = self.pendingMetrics
-    }
-    if !pendingMetrics.isEmpty {
-      let sentCount = pendingMetrics.count
-      let body =
-        Opentelemetry_Proto_Collector_Metrics_V1_ExportMetricsServiceRequest
-          .with {
-            $0.resourceMetrics = MetricsAdapter.toProtoResourceMetrics(
-              metricData: pendingMetrics)
-          }
-      let semaphore = DispatchSemaphore(value: 0)
-      var request = createRequest(body: body, endpoint: endpoint)
-      let timeout = min(TimeInterval.greatestFiniteMagnitude, config.timeout)
-      request.timeoutInterval = timeout
-      httpClient.send(request: request) { [weak self] result in
-        switch result {
-        case .success:
-          self?.exporterMetrics?.addSuccess(value: sentCount)
-          // Drop the records we successfully flushed from the pending queue.
-          self?.exporterLock.withLockVoid {
-            guard let self else { return }
-            let n = min(sentCount, self.pendingMetrics.count)
-            self.pendingMetrics.removeFirst(n)
-          }
-        case let .failure(error):
-          self?.exporterMetrics?.addFailed(value: sentCount)
-          OpenTelemetry.instance.feedbackHandler?("\(error)")
-          exporterResult = .failure
-        }
-        semaphore.signal()
-      }
-
-      let waitResult = semaphore.wait(timeout: .now() + timeout)
-      if waitResult == .timedOut {
-        exporterMetrics?.addFailed(value: sentCount)
-        return .failure
-      }
-    }
-
-    return exporterResult
+    performPendingFlushSync(
+      explicitTimeout: nil,
+      makeRequest: { makeMetricExportRequest(for: $0, explicitTimeout: nil) })
+    ? .success
+    : .failure
   }
-
+  
   public func shutdown() -> ExportResult {
     return .success
   }
-
+  
+  public func export(metrics: [MetricData]) async -> ExportResult {
+    let sendingMetrics = pendingExport.drain(adding: metrics)
+    let request = makeMetricExportRequest(for: sendingMetrics, explicitTimeout: nil)
+    
+    exporterMetrics?.addSeen(value: sendingMetrics.count)
+    switch await httpClient.sendReturningResult(request: request) {
+    case .success:
+      exporterMetrics?.addSuccess(value: sendingMetrics.count)
+      return .success
+    case let .failure(error):
+      recordExportSendFailure(
+        error,
+        sending: sendingMetrics,
+        skipRequeueOnTimeout: true)
+      return .failure
+    }
+  }
+  
+  public func flush() async -> ExportResult {
+    await performPendingFlushAsync(
+      explicitTimeout: nil,
+      makeRequest: { makeMetricExportRequest(for: $0, explicitTimeout: nil) })
+    ? .success
+    : .failure
+  }
+  
+  public func shutdown() async -> ExportResult {
+    return .success
+  }
+  
   // MARK: - AggregationTemporalitySelectorProtocol
-
+  
   public func getAggregationTemporality(
     for instrument: OpenTelemetrySdk.InstrumentType
   ) -> OpenTelemetrySdk.AggregationTemporality {
     return aggregationTemporalitySelector.getAggregationTemporality(
       for: instrument)
   }
-
+  
   // MARK: - DefaultAggregationSelector
-
+  
   public func getDefaultAggregation(
     for instrument: OpenTelemetrySdk.InstrumentType
   ) -> OpenTelemetrySdk.Aggregation {
     return defaultAggregationSelector.getDefaultAggregation(for: instrument)
+  }
+}
+
+private extension OtlpHttpMetricExporter {
+  func makeMetricExportRequest(for metrics: [MetricData],
+                               explicitTimeout: TimeInterval? = nil) -> URLRequest {
+    let body =
+    Opentelemetry_Proto_Collector_Metrics_V1_ExportMetricsServiceRequest.with {
+      $0.resourceMetrics = MetricsAdapter.toProtoResourceMetrics(metricData: metrics)
+    }
+    var request = createRequest(body: body, endpoint: endpoint)
+    request.timeoutInterval = exportTimeout(explicitTimeout: explicitTimeout)
+    return request
   }
 }

@@ -96,6 +96,28 @@ class OtlpHttpTraceExporterTests: XCTestCase {
     XCTAssertEqual(SpanExporterResultCode.success, exporter.flush())
   }
 
+  func testAsyncExport() async {
+    let testHeader = ("testHeader", "testValue")
+    let endpoint = URL(string: "http://localhost:\(testServer.serverPort)/v1/traces")!
+    let config = OtlpConfiguration(compression: .none, headers: [testHeader])
+    let exporter = OtlpHttpTraceExporter(endpoint: endpoint, config: config)
+
+    let endpointName = "/api/async" + String(Int.random(in: 1 ... 100))
+    let result = await exporter.export(spans: [generateFakeSpan(endpointName: endpointName)])
+    XCTAssertEqual(result, .success)
+
+    XCTAssertNoThrow(try testServer.receiveHeadAndVerify { head in
+      XCTAssertTrue(head.headers.contains { header in
+        header.name.lowercased() == testHeader.0.lowercased() && header.value == testHeader.1
+      })
+    })
+    XCTAssertNoThrow(try testServer.receiveBodyAndVerify { body in
+      let bodyString = String(decoding: body, as: UTF8.self)
+      XCTAssertTrue(bodyString.contains(endpointName))
+    })
+    XCTAssertNoThrow(try testServer.receiveEnd())
+  }
+
   private func generateFakeSpan(endpointName: String = "/api/endpoint") -> SpanData {
     let duration = 0.9
     let start = Date()

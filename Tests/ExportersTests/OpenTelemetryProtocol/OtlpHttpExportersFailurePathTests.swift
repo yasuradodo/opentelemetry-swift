@@ -58,6 +58,77 @@ private final class StubHTTPClient: HTTPClient {
 
 private struct TransientNetworkError: Error {}
 
+/// Fails the first request, blocks the second until released, then succeeds.
+private final class BlockSecondRequestHTTPClient: HTTPClient {
+  private var sendCount = 0
+  private let stateLock = NSLock()
+  private var allowSecondRequest = false
+  let secondRequestBlocked = DispatchSemaphore(value: 0)
+  private(set) var sentRequests: [URLRequest] = []
+
+  func releaseSecondRequest() {
+    stateLock.withLock { allowSecondRequest = true }
+  }
+
+  private func makeResponse(for request: URLRequest) -> HTTPURLResponse {
+    HTTPURLResponse(url: request.url!,
+                    statusCode: 200,
+                    httpVersion: "HTTP/1.1",
+                    headerFields: nil)!
+  }
+
+  private func waitForSecondRequestReleaseSync() -> Bool {
+    let deadline = Date().addingTimeInterval(2)
+    while !stateLock.withLock({ allowSecondRequest }) {
+      if Date() >= deadline { return false }
+      Thread.sleep(forTimeInterval: 0.001)
+    }
+    return true
+  }
+
+  private func waitForSecondRequestReleaseAsync() async throws {
+    let deadline = Date().addingTimeInterval(2)
+    while !stateLock.withLock({ allowSecondRequest }) {
+      if Date() >= deadline { throw TransientNetworkError() }
+      try await Task.sleep(nanoseconds: 1_000_000)
+    }
+  }
+
+  func send(request: URLRequest,
+            completion: @escaping (Result<HTTPURLResponse, Error>) -> Void) {
+    sendCount += 1
+    sentRequests.append(request)
+    switch sendCount {
+    case 1:
+      completion(.failure(TransientNetworkError()))
+    case 2:
+      secondRequestBlocked.signal()
+      guard waitForSecondRequestReleaseSync() else {
+        completion(.failure(TransientNetworkError()))
+        return
+      }
+      completion(.success(makeResponse(for: request)))
+    default:
+      completion(.success(makeResponse(for: request)))
+    }
+  }
+
+  func send(request: URLRequest) async throws -> HTTPURLResponse {
+    sendCount += 1
+    sentRequests.append(request)
+    switch sendCount {
+    case 1:
+      throw TransientNetworkError()
+    case 2:
+      secondRequestBlocked.signal()
+      try await waitForSecondRequestReleaseAsync()
+      return makeResponse(for: request)
+    default:
+      return makeResponse(for: request)
+    }
+  }
+}
+
 /// Fails the first request, then never invokes the completion handler. This gives
 /// `flush()` pending data to send and no response to wait on — the shape that made
 /// an unbounded `semaphore.wait()` block the calling thread forever.
@@ -76,7 +147,8 @@ private final class HangingAfterFirstFailureHTTPClient: HTTPClient {
     if sendCount == 1 {
       throw TransientNetworkError()
     }
-    return await withCheckedContinuation { (_: CheckedContinuation<HTTPURLResponse, Never>) in }
+    try await Task.sleep(nanoseconds: UInt64(request.timeoutInterval * 1_000_000_000))
+    throw URLError(.timedOut)
   }
 }
 
@@ -139,7 +211,7 @@ final class OtlpHttpLogExporterCoverageTests: XCTestCase {
     _ = exporter.export(logRecords: [sampleLogRecord()])
     XCTAssertEqual(exporter.pendingLogRecords.count, 1)
 
-    let flushResult = exporter.flush()
+    let flushResult = exporter.forceFlush()
     XCTAssertEqual(flushResult, .success)
     XCTAssertEqual(client.sentRequests.count, 2)
     // flush() must drop successfully-flushed records; otherwise every
@@ -150,14 +222,8 @@ final class OtlpHttpLogExporterCoverageTests: XCTestCase {
   func testFlushWithNoPendingReturnsSuccess() {
     let client = StubHTTPClient(outcomes: [])
     let exporter = OtlpHttpLogExporter(httpClient: client)
-    XCTAssertEqual(exporter.flush(), .success)
-    XCTAssertEqual(client.sentRequests.count, 0)
-  }
-
-  func testForceFlushDelegatesToFlush() {
-    let client = StubHTTPClient(outcomes: [])
-    let exporter = OtlpHttpLogExporter(httpClient: client)
     XCTAssertEqual(exporter.forceFlush(), .success)
+    XCTAssertEqual(client.sentRequests.count, 0)
   }
 
   func testFlushWithEnvVarHeadersAppliesHeaders() {
@@ -166,7 +232,7 @@ final class OtlpHttpLogExporterCoverageTests: XCTestCase {
       httpClient: client,
       envVarHeaders: [("X-Test", "value")])
     _ = exporter.export(logRecords: [sampleLogRecord()])
-    _ = exporter.flush()
+    _ = exporter.forceFlush()
     XCTAssertEqual(client.sentRequests.last?.value(forHTTPHeaderField: "X-Test"), "value")
   }
 
@@ -175,7 +241,7 @@ final class OtlpHttpLogExporterCoverageTests: XCTestCase {
     let config = OtlpConfiguration(headers: [("X-Config", "c-value")])
     let exporter = OtlpHttpLogExporter(config: config, httpClient: client, envVarHeaders: nil)
     _ = exporter.export(logRecords: [sampleLogRecord()])
-    _ = exporter.flush()
+    _ = exporter.forceFlush()
     XCTAssertEqual(client.sentRequests.last?.value(forHTTPHeaderField: "X-Config"), "c-value")
   }
 
@@ -190,7 +256,7 @@ final class OtlpHttpLogExporterCoverageTests: XCTestCase {
 
     _ = exporter.export(logRecords: [sampleLogRecord()])
     provider.update([("Authorization", "Bearer second")])
-    XCTAssertEqual(exporter.flush(), .success)
+    XCTAssertEqual(exporter.forceFlush(), .success)
 
     XCTAssertEqual(client.sentRequests[0].value(forHTTPHeaderField: "Authorization"), "Bearer first")
     XCTAssertEqual(client.sentRequests[1].value(forHTTPHeaderField: "Authorization"), "Bearer second")
@@ -206,7 +272,7 @@ final class OtlpHttpLogExporterCoverageTests: XCTestCase {
     ])
     let exporter = OtlpHttpLogExporter(httpClient: client)
     _ = exporter.export(logRecords: [sampleLogRecord()])
-    XCTAssertEqual(exporter.flush(), .failure)
+    XCTAssertEqual(exporter.forceFlush(), .failure)
   }
 }
 
@@ -258,8 +324,8 @@ final class OtlpHttpTraceExporterCoverageTests: XCTestCase {
   }
 
   func testFlushFailureAfterRetryReturnsFailure() {
-    // export fails, then flush also fails — exercises the .failure branch
-    // inside flush() and increments the failure metric counter.
+    // export fails → record goes back to pending. flush also fails → exporter
+    // reports .failure and exercises the failure branch inside flush().
     let client = StubHTTPClient(outcomes: [
       .failure(TransientNetworkError()),
       .failure(TransientNetworkError())
@@ -267,6 +333,32 @@ final class OtlpHttpTraceExporterCoverageTests: XCTestCase {
     let exporter = OtlpHttpTraceExporter(httpClient: client)
     _ = exporter.export(spans: [sampleSpanData()])
     XCTAssertEqual(exporter.flush(), .failure)
+    XCTAssertEqual(exporter.pendingSpans.count, 1)
+  }
+
+  func testConcurrentExportDuringFlushDoesNotDuplicateSignals() {
+    let client = BlockSecondRequestHTTPClient()
+    let exporter = OtlpHttpTraceExporter(httpClient: client)
+
+    XCTAssertEqual(exporter.export(spans: [sampleSpanData()]), .failure)
+    XCTAssertEqual(exporter.pendingSpans.count, 1)
+
+    let flushFinished = DispatchSemaphore(value: 0)
+    nonisolated(unsafe) var flushResult = SpanExporterResultCode.failure
+    DispatchQueue.global(qos: .default).async {
+      flushResult = exporter.flush()
+      flushFinished.signal()
+    }
+
+    XCTAssertEqual(client.secondRequestBlocked.wait(timeout: .now() + 2), .success)
+    XCTAssertEqual(exporter.export(spans: [sampleSpanData()]), .success)
+    XCTAssertEqual(exporter.pendingSpans.count, 0)
+    XCTAssertEqual(client.sentRequests.count, 3)
+
+    client.releaseSecondRequest()
+    XCTAssertEqual(flushFinished.wait(timeout: .now() + 2), .success)
+    XCTAssertEqual(flushResult, .success)
+    XCTAssertEqual(client.sentRequests.count, 3)
   }
 
   func testFlushFailureWithMeterProviderRecordsFailedCounter() {
@@ -327,7 +419,7 @@ final class OtlpHttpExporterFlushTimeoutTests: XCTestCase {
     XCTAssertEqual(exporter.pendingLogRecords.count, 1)
 
     let start = Date()
-    XCTAssertEqual(exporter.flush(), .failure)
+    XCTAssertEqual(exporter.forceFlush(), .failure)
     XCTAssertLessThan(Date().timeIntervalSince(start), timeout * 4)
   }
 
