@@ -54,41 +54,39 @@ public class OtlpHttpTraceExporter: OtlpHttpExporterBase<SpanData>, SpanExporter
   }
 
   public func export(spans: [SpanData], explicitTimeout: TimeInterval? = nil)
-  -> SpanExporterResultCode {
+  -> OpenTelemetrySdk.SpanExporterResultCode {
     performExport(adding: spans,
-                      explicitTimeout: explicitTimeout,
-                      makeRequest: makeTraceExportRequest)
-    ? .success
-    : .failure
+                  explicitTimeout: explicitTimeout,
+                  makeRequest: makeTraceExportRequest)
+    .result()
   }
 
   public func flush(explicitTimeout: TimeInterval? = nil)
-  -> SpanExporterResultCode {
+  -> OpenTelemetrySdk.SpanExporterResultCode {
     performFlush(explicitTimeout: explicitTimeout,
-                     makeRequest: makeTraceExportRequest)
-    ? .success
-    : .failure
+                 makeRequest: makeTraceExportRequest)
+    .result()
   }
 
   public func export(spans: [SpanData], explicitTimeout: TimeInterval? = nil) async
-  -> SpanExporterResultCode {
+  -> OpenTelemetrySdk.SpanExporterResultCode {
     await performExport(adding: spans,
-                             explicitTimeout: explicitTimeout,
-                             skipRequeueOnTimeout: true,
-                             makeRequest: makeTraceExportRequest)
-    ? .success
-    : .failure
+                        explicitTimeout: explicitTimeout,
+                        skipRequeueOnTimeout: true,
+                        makeRequest: makeTraceExportRequest)
+    .result()
   }
 
-  public func flush(explicitTimeout: TimeInterval? = nil) async -> SpanExporterResultCode {
+  public func flush(explicitTimeout: TimeInterval? = nil) async -> OpenTelemetrySdk.SpanExporterResultCode {
     await performFlush(explicitTimeout: explicitTimeout,
-                            makeRequest: makeTraceExportRequest)
-    ? .success
-    : .failure
+                       makeRequest: makeTraceExportRequest)
+    .result()
   }
+}
 
-  public func shutdown(explicitTimeout: TimeInterval? = nil) async {
-    super.shutdown(explicitTimeout: explicitTimeout)
+private extension Bool {
+  func result() -> OpenTelemetrySdk.SpanExporterResultCode {
+    self ? .success : .failure
   }
 }
 

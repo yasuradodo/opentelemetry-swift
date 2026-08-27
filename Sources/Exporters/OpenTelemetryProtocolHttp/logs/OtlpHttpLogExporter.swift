@@ -62,32 +62,31 @@ public class OtlpHttpLogExporter: OtlpHttpExporterBase<ReadableLogRecord>, LogRe
     return .success
   }
 
-  public func forceFlush(explicitTimeout: TimeInterval? = nil) -> ExportResult {
+  public func forceFlush(explicitTimeout: TimeInterval? = nil) -> OpenTelemetrySdk.ExportResult {
     performFlush(explicitTimeout: explicitTimeout,
-                     makeRequest: makeLogExportRequest)
-    ? .success
-    : .failure
+                 makeRequest: makeLogExportRequest)
+    .result()
   }
 
   public func export(logRecords: [OpenTelemetrySdk.ReadableLogRecord],
                      explicitTimeout: TimeInterval? = nil) async -> OpenTelemetrySdk.ExportResult {
     await performExport(adding: logRecords,
-                             explicitTimeout: explicitTimeout,
-                             skipRequeueOnTimeout: true,
-                             makeRequest: makeLogExportRequest)
-    ? .success
-    : .failure
+                        explicitTimeout: explicitTimeout,
+                        skipRequeueOnTimeout: true,
+                        makeRequest: makeLogExportRequest)
+    .result()
   }
 
-  public func forceFlush(explicitTimeout: TimeInterval? = nil) async -> ExportResult {
+  public func forceFlush(explicitTimeout: TimeInterval? = nil) async -> OpenTelemetrySdk.ExportResult {
     await performFlush(explicitTimeout: explicitTimeout,
-                            makeRequest: makeLogExportRequest)
-    ? .success
-    : .failure
+                       makeRequest: makeLogExportRequest)
+    .result()
   }
+}
 
-  public func shutdown(explicitTimeout: TimeInterval? = nil) async {
-    super.shutdown(explicitTimeout: explicitTimeout)
+private extension Bool {
+  func result() -> OpenTelemetrySdk.ExportResult {
+    self ? .success : .failure
   }
 }
 

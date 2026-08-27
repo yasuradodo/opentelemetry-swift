@@ -148,10 +148,9 @@ public class OtlpHttpExporterBase<Signal: Sendable>: @unchecked Sendable {
     case .success:
       exporterMetrics?.addSuccess(value: sending.count)
     case let .failure(error):
-      recordExportSendFailure(
-        error,
-        sending: sending,
-        skipRequeueOnTimeout: skipRequeueOnTimeout)
+      recordExportSendFailure(error,
+                              sending: sending,
+                              skipRequeueOnTimeout: skipRequeueOnTimeout)
     }
   }
 
@@ -179,10 +178,9 @@ public class OtlpHttpExporterBase<Signal: Sendable>: @unchecked Sendable {
     exporterMetrics?.addSeen(value: sending.count)
     httpClient.send(request: request) { [weak self] result in
       guard let self else { return }
-      self.handleExportSendResult(
-        result,
-        sending: sending,
-        skipRequeueOnTimeout: skipRequeueOnTimeout)
+      self.handleExportSendResult(result,
+                                  sending: sending,
+                                  skipRequeueOnTimeout: skipRequeueOnTimeout)
     }
   }
 
@@ -201,10 +199,9 @@ public class OtlpHttpExporterBase<Signal: Sendable>: @unchecked Sendable {
       recordSendTimedOut(sentCount: sending.count)
       return false
     case let .failure(error):
-      recordExportSendFailure(
-        error,
-        sending: sending,
-        skipRequeueOnTimeout: false)
+      recordExportSendFailure(error,
+                              sending: sending,
+                              skipRequeueOnTimeout: false)
       return false
     }
   }
@@ -221,10 +218,9 @@ public class OtlpHttpExporterBase<Signal: Sendable>: @unchecked Sendable {
       exporterMetrics?.addSuccess(value: sending.count)
       return true
     case let .failure(error):
-      recordExportSendFailure(
-        error,
-        sending: sending,
-        skipRequeueOnTimeout: skipRequeueOnTimeout)
+      recordExportSendFailure(error,
+                              sending: sending,
+                              skipRequeueOnTimeout: skipRequeueOnTimeout)
       return false
     }
   }

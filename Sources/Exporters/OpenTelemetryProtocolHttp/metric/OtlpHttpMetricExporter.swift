@@ -84,7 +84,7 @@ public class OtlpHttpMetricExporter: OtlpHttpExporterBase<MetricData>, MetricExp
   
   // MARK: - StableMetricsExporter
   
-  public func export(metrics: [MetricData]) -> ExportResult {
+  public func export(metrics: [MetricData]) -> OpenTelemetrySdk.ExportResult {
     performExportFireAndForget(adding: metrics,
                                explicitTimeout: nil,
                                skipRequeueOnTimeout: false,
@@ -92,34 +92,31 @@ public class OtlpHttpMetricExporter: OtlpHttpExporterBase<MetricData>, MetricExp
     return .success
   }
 
-  public func flush() -> ExportResult {
+  public func flush() -> OpenTelemetrySdk.ExportResult {
     performFlush(explicitTimeout: nil,
-                     makeRequest: makeMetricExportRequest)
-    ? .success
-    : .failure
+                 makeRequest: makeMetricExportRequest)
+    .result()
   }
 
-  public func shutdown() -> ExportResult {
+  public func shutdown() -> OpenTelemetrySdk.ExportResult {
     return .success
   }
 
-  public func export(metrics: [MetricData]) async -> ExportResult {
+  public func export(metrics: [MetricData]) async -> OpenTelemetrySdk.ExportResult {
     await performExport(adding: metrics,
-                             explicitTimeout: nil,
-                             skipRequeueOnTimeout: true,
-                             makeRequest: makeMetricExportRequest)
-    ? .success
-    : .failure
+                        explicitTimeout: nil,
+                        skipRequeueOnTimeout: true,
+                        makeRequest: makeMetricExportRequest)
+    .result()
   }
 
-  public func flush() async -> ExportResult {
+  public func flush() async -> OpenTelemetrySdk.ExportResult {
     await performFlush(explicitTimeout: nil,
-                            makeRequest: makeMetricExportRequest)
-    ? .success
-    : .failure
+                       makeRequest: makeMetricExportRequest)
+    .result()
   }
   
-  public func shutdown() async -> ExportResult {
+  public func shutdown() async -> OpenTelemetrySdk.ExportResult {
     return .success
   }
   
@@ -138,6 +135,12 @@ public class OtlpHttpMetricExporter: OtlpHttpExporterBase<MetricData>, MetricExp
     for instrument: OpenTelemetrySdk.InstrumentType
   ) -> OpenTelemetrySdk.Aggregation {
     return defaultAggregationSelector.getDefaultAggregation(for: instrument)
+  }
+}
+
+private extension Bool {
+  func result() -> OpenTelemetrySdk.ExportResult {
+    self ? .success : .failure
   }
 }
 
