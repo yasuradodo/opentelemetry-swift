@@ -55,7 +55,7 @@ public class OtlpHttpTraceExporter: OtlpHttpExporterBase<SpanData>, SpanExporter
 
   public func export(spans: [SpanData], explicitTimeout: TimeInterval? = nil)
   -> SpanExporterResultCode {
-    performExportSync(adding: spans,
+    performExport(adding: spans,
                       explicitTimeout: explicitTimeout,
                       makeRequest: makeTraceExportRequest)
     ? .success
@@ -64,7 +64,7 @@ public class OtlpHttpTraceExporter: OtlpHttpExporterBase<SpanData>, SpanExporter
 
   public func flush(explicitTimeout: TimeInterval? = nil)
   -> SpanExporterResultCode {
-    performFlushSync(explicitTimeout: explicitTimeout,
+    performFlush(explicitTimeout: explicitTimeout,
                      makeRequest: makeTraceExportRequest)
     ? .success
     : .failure
@@ -72,7 +72,7 @@ public class OtlpHttpTraceExporter: OtlpHttpExporterBase<SpanData>, SpanExporter
 
   public func export(spans: [SpanData], explicitTimeout: TimeInterval? = nil) async
   -> SpanExporterResultCode {
-    await performExportAsync(adding: spans,
+    await performExport(adding: spans,
                              explicitTimeout: explicitTimeout,
                              skipRequeueOnTimeout: true,
                              makeRequest: makeTraceExportRequest)
@@ -81,7 +81,7 @@ public class OtlpHttpTraceExporter: OtlpHttpExporterBase<SpanData>, SpanExporter
   }
 
   public func flush(explicitTimeout: TimeInterval? = nil) async -> SpanExporterResultCode {
-    await performFlushAsync(explicitTimeout: explicitTimeout,
+    await performFlush(explicitTimeout: explicitTimeout,
                             makeRequest: makeTraceExportRequest)
     ? .success
     : .failure

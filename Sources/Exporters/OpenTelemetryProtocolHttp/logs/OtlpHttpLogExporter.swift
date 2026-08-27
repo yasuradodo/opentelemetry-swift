@@ -63,7 +63,7 @@ public class OtlpHttpLogExporter: OtlpHttpExporterBase<ReadableLogRecord>, LogRe
   }
 
   public func forceFlush(explicitTimeout: TimeInterval? = nil) -> ExportResult {
-    performFlushSync(explicitTimeout: explicitTimeout,
+    performFlush(explicitTimeout: explicitTimeout,
                      makeRequest: makeLogExportRequest)
     ? .success
     : .failure
@@ -71,7 +71,7 @@ public class OtlpHttpLogExporter: OtlpHttpExporterBase<ReadableLogRecord>, LogRe
 
   public func export(logRecords: [OpenTelemetrySdk.ReadableLogRecord],
                      explicitTimeout: TimeInterval? = nil) async -> OpenTelemetrySdk.ExportResult {
-    await performExportAsync(adding: logRecords,
+    await performExport(adding: logRecords,
                              explicitTimeout: explicitTimeout,
                              skipRequeueOnTimeout: true,
                              makeRequest: makeLogExportRequest)
@@ -80,7 +80,7 @@ public class OtlpHttpLogExporter: OtlpHttpExporterBase<ReadableLogRecord>, LogRe
   }
 
   public func forceFlush(explicitTimeout: TimeInterval? = nil) async -> ExportResult {
-    await performFlushAsync(explicitTimeout: explicitTimeout,
+    await performFlush(explicitTimeout: explicitTimeout,
                             makeRequest: makeLogExportRequest)
     ? .success
     : .failure

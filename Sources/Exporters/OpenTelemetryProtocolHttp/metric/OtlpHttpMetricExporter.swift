@@ -93,7 +93,7 @@ public class OtlpHttpMetricExporter: OtlpHttpExporterBase<MetricData>, MetricExp
   }
 
   public func flush() -> ExportResult {
-    performFlushSync(explicitTimeout: nil,
+    performFlush(explicitTimeout: nil,
                      makeRequest: makeMetricExportRequest)
     ? .success
     : .failure
@@ -104,7 +104,7 @@ public class OtlpHttpMetricExporter: OtlpHttpExporterBase<MetricData>, MetricExp
   }
 
   public func export(metrics: [MetricData]) async -> ExportResult {
-    await performExportAsync(adding: metrics,
+    await performExport(adding: metrics,
                              explicitTimeout: nil,
                              skipRequeueOnTimeout: true,
                              makeRequest: makeMetricExportRequest)
@@ -113,7 +113,7 @@ public class OtlpHttpMetricExporter: OtlpHttpExporterBase<MetricData>, MetricExp
   }
 
   public func flush() async -> ExportResult {
-    await performFlushAsync(explicitTimeout: nil,
+    await performFlush(explicitTimeout: nil,
                             makeRequest: makeMetricExportRequest)
     ? .success
     : .failure
