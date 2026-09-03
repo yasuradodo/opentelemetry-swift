@@ -20,6 +20,8 @@ public final class OtlpHttpTraceExporter: SpanExporter, @unchecked Sendable {
   private let base: OtlpHttpExporterBase<SpanData>
   private var exporterMetrics: ExporterMetrics?
 
+  // MARK: - Init
+
   init(base: OtlpHttpExporterBase<SpanData>) {
     self.base = base
   }
@@ -70,21 +72,16 @@ public final class OtlpHttpTraceExporter: SpanExporter, @unchecked Sendable {
                                         : ExporterMetrics.TransporterType.grpc)
   }
 
+  // MARK: - SpanExporter
+
   public func export(spans: [SpanData], explicitTimeout: TimeInterval? = nil)
     -> SpanExporterResultCode {
     var resultValue: SpanExporterResultCode = .success
     let sendingSpans = base.drainPending(adding: spans)
 
-    let body =
-      Opentelemetry_Proto_Collector_Trace_V1_ExportTraceServiceRequest.with {
-        $0.resourceSpans = SpanAdapter.toProtoResourceSpans(
-          spanDataList: sendingSpans)
-      }
     let semaphore = DispatchSemaphore(value: 0)
-    var request = base.createRequest(body: body, endpoint: base.endpoint)
-
-    let timeout = min(explicitTimeout ?? TimeInterval.greatestFiniteMagnitude, base.config.timeout)
-    request.timeoutInterval = timeout
+    let request = makeTraceExportRequest(sendingSpans, explicitTimeout: explicitTimeout)
+    let timeout = request.timeoutInterval
 
     exporterMetrics?.addSeen(value: sendingSpans.count)
     base.httpClient.send(request: request) { [weak self] result in
@@ -114,15 +111,9 @@ public final class OtlpHttpTraceExporter: SpanExporter, @unchecked Sendable {
     let pendingSpans = base.snapshotPending()
     if !pendingSpans.isEmpty {
       let sentCount = pendingSpans.count
-      let body =
-        Opentelemetry_Proto_Collector_Trace_V1_ExportTraceServiceRequest.with {
-          $0.resourceSpans = SpanAdapter.toProtoResourceSpans(
-            spanDataList: pendingSpans)
-        }
       let semaphore = DispatchSemaphore(value: 0)
-      var request = base.createRequest(body: body, endpoint: base.endpoint)
-      let timeout = min(explicitTimeout ?? TimeInterval.greatestFiniteMagnitude, base.config.timeout)
-      request.timeoutInterval = timeout
+      let request = makeTraceExportRequest(pendingSpans, explicitTimeout: explicitTimeout)
+      let timeout = request.timeoutInterval
 
       base.httpClient.send(request: request) { [weak self] result in
         switch result {
@@ -147,4 +138,47 @@ public final class OtlpHttpTraceExporter: SpanExporter, @unchecked Sendable {
   }
 
   public func shutdown(explicitTimeout: TimeInterval? = nil) {}
+
+  public func export(spans: [SpanData], explicitTimeout: TimeInterval? = nil) async
+    -> SpanExporterResultCode {
+    switch await base.performExport(adding: spans,
+                                    explicitTimeout: explicitTimeout,
+                                    metrics: exporterMetrics,
+                                    makeRequest: { signals in
+      makeTraceExportRequest(signals, explicitTimeout: explicitTimeout)
+    }) {
+    case .success:
+      return .success
+    case .failure:
+      return .failure
+    }
+  }
+
+  public func flush(explicitTimeout: TimeInterval? = nil) async -> SpanExporterResultCode {
+    switch await base.performFlush(explicitTimeout: explicitTimeout,
+                                   metrics: exporterMetrics,
+                                   makeRequest: { signals in
+      makeTraceExportRequest(signals, explicitTimeout: explicitTimeout)
+    }) {
+    case .success:
+      return .success
+    case .failure:
+      return .failure
+    }
+  }
+
+  public func shutdown(explicitTimeout: TimeInterval?) async {}
+
+  // MARK: - Private
+
+  private func makeTraceExportRequest(_ spans: [SpanData],
+                                       explicitTimeout: TimeInterval?) -> URLRequest {
+    let body =
+      Opentelemetry_Proto_Collector_Trace_V1_ExportTraceServiceRequest.with {
+        $0.resourceSpans = SpanAdapter.toProtoResourceSpans(spanDataList: spans)
+      }
+    var request = base.createRequest(body: body, endpoint: base.endpoint)
+    request.timeoutInterval = base.exportTimeout(explicitTimeout: explicitTimeout)
+    return request
+  }
 }

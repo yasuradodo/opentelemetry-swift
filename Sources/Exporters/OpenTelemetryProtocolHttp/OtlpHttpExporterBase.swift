@@ -10,6 +10,7 @@ import SwiftProtobuf
 import FoundationNetworking
 #endif
 import OpenTelemetryApi
+import OpenTelemetrySdk
 
 final class OtlpHttpExporterBase<Signal: Sendable>: @unchecked Sendable {
   let endpoint: URL
@@ -124,5 +125,60 @@ final class OtlpHttpExporterBase<Signal: Sendable>: @unchecked Sendable {
       OpenTelemetry.instance.feedbackHandler?("Error serializing body: \(error)")
     }
     return request
+  }
+
+  func exportTimeout(explicitTimeout: TimeInterval?) -> TimeInterval {
+    min(explicitTimeout ?? .greatestFiniteMagnitude, config.timeout)
+  }
+
+  func performExport(adding incoming: [Signal],
+                     explicitTimeout: TimeInterval?,
+                     metrics: ExporterMetrics?,
+                     makeRequest: ([Signal]) -> URLRequest) async -> ExportResult {
+    let sending = drainPending(adding: incoming)
+    metrics?.addSeen(value: sending.count)
+    var request = makeRequest(sending)
+    request.timeoutInterval = exportTimeout(explicitTimeout: explicitTimeout)
+
+    do {
+      _ = try await httpClient.send(request: request)
+      metrics?.addSuccess(value: sending.count)
+      return .success
+    } catch {
+      metrics?.addFailed(value: sending.count)
+      if !isTimeoutError(error) {
+        requeue(sending)
+      }
+      OpenTelemetry.instance.feedbackHandler?("\(error)")
+      return .failure
+    }
+  }
+
+  func performFlush(explicitTimeout: TimeInterval?,
+                    metrics: ExporterMetrics?,
+                    makeRequest: ([Signal]) -> URLRequest) async -> ExportResult {
+    let pending = snapshotPending()
+    if pending.isEmpty {
+      return .success
+    }
+    let sentCount = pending.count
+    var request = makeRequest(pending)
+    request.timeoutInterval = exportTimeout(explicitTimeout: explicitTimeout)
+
+    do {
+      _ = try await httpClient.send(request: request)
+      metrics?.addSuccess(value: sentCount)
+      dropFlushed(count: sentCount)
+      return .success
+    } catch {
+      metrics?.addFailed(value: sentCount)
+      OpenTelemetry.instance.feedbackHandler?("\(error)")
+      return .failure
+    }
+  }
+
+  private func isTimeoutError(_ error: Error) -> Bool {
+    guard let urlError = error as? URLError else { return false }
+    return urlError.code == .timedOut
   }
 }
