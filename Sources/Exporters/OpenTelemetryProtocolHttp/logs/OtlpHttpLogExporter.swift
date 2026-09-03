@@ -74,6 +74,8 @@ public final class OtlpHttpLogExporter: LogRecordExporter, @unchecked Sendable {
 
   // MARK: - LogRecordExporter
 
+  // MARK: Export
+
   public func export(logRecords: [OpenTelemetrySdk.ReadableLogRecord],
                      explicitTimeout: TimeInterval? = nil) -> OpenTelemetrySdk.ExportResult {
     let sendingLogRecords = base.drainPending(adding: logRecords)
@@ -94,9 +96,22 @@ public final class OtlpHttpLogExporter: LogRecordExporter, @unchecked Sendable {
     return .success
   }
 
-  public func forceFlush(explicitTimeout: TimeInterval? = nil) -> ExportResult {
-    flush(explicitTimeout: explicitTimeout)
+  public func export(logRecords: [OpenTelemetrySdk.ReadableLogRecord],
+                     explicitTimeout: TimeInterval? = nil) async -> OpenTelemetrySdk.ExportResult {
+    await base.performExport(adding: logRecords,
+                             explicitTimeout: explicitTimeout,
+                             metrics: exporterMetrics) { signals in
+      makeLogExportRequest(signals, explicitTimeout: explicitTimeout)
+    }
   }
+
+  // MARK: Shutdown
+
+  public func shutdown(explicitTimeout: TimeInterval? = nil) {}
+
+  public func shutdown(explicitTimeout: TimeInterval?) async {}
+
+  // MARK: Force flush
 
   public func flush(explicitTimeout: TimeInterval? = nil) -> ExportResult {
     var exporterResult: ExportResult = .success
@@ -131,19 +146,8 @@ public final class OtlpHttpLogExporter: LogRecordExporter, @unchecked Sendable {
     return exporterResult
   }
 
-  public func shutdown(explicitTimeout: TimeInterval? = nil) {}
-
-  public func export(logRecords: [OpenTelemetrySdk.ReadableLogRecord],
-                     explicitTimeout: TimeInterval? = nil) async -> OpenTelemetrySdk.ExportResult {
-    await base.performExport(adding: logRecords,
-                             explicitTimeout: explicitTimeout,
-                             metrics: exporterMetrics) { signals in
-      makeLogExportRequest(signals, explicitTimeout: explicitTimeout)
-    }
-  }
-
-  public func forceFlush(explicitTimeout: TimeInterval? = nil) async -> ExportResult {
-    await flush(explicitTimeout: explicitTimeout)
+  public func forceFlush(explicitTimeout: TimeInterval? = nil) -> ExportResult {
+    flush(explicitTimeout: explicitTimeout)
   }
 
   public func flush(explicitTimeout: TimeInterval? = nil) async -> ExportResult {
@@ -153,7 +157,9 @@ public final class OtlpHttpLogExporter: LogRecordExporter, @unchecked Sendable {
     }
   }
 
-  public func shutdown(explicitTimeout: TimeInterval?) async {}
+  public func forceFlush(explicitTimeout: TimeInterval? = nil) async -> ExportResult {
+    await flush(explicitTimeout: explicitTimeout)
+  }
 
   // MARK: - Private
 

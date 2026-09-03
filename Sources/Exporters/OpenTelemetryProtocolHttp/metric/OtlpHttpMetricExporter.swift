@@ -107,6 +107,8 @@ public final class OtlpHttpMetricExporter: MetricExporter, @unchecked Sendable {
 
   // MARK: - MetricExporter
 
+  // MARK: Export
+
   public func export(metrics: [MetricData]) -> ExportResult {
     let sendingMetrics = base.drainPending(adding: metrics)
     exporterMetrics?.addSeen(value: sendingMetrics.count)
@@ -124,6 +126,16 @@ public final class OtlpHttpMetricExporter: MetricExporter, @unchecked Sendable {
 
     return .success
   }
+
+  public func export(metrics: [MetricData]) async -> ExportResult {
+    await base.performExport(adding: metrics,
+                             explicitTimeout: nil,
+                             metrics: exporterMetrics) { signals in
+      makeMetricExportRequest(signals)
+    }
+  }
+
+  // MARK: Flush
 
   public func flush() -> ExportResult {
     var exporterResult: ExportResult = .success
@@ -156,23 +168,17 @@ public final class OtlpHttpMetricExporter: MetricExporter, @unchecked Sendable {
     return exporterResult
   }
 
-  public func shutdown() -> ExportResult {
-    return .success
-  }
-
-  public func export(metrics: [MetricData]) async -> ExportResult {
-    await base.performExport(adding: metrics,
-                             explicitTimeout: nil,
-                             metrics: exporterMetrics) { signals in
-      makeMetricExportRequest(signals)
-    }
-  }
-
   public func flush() async -> ExportResult {
     await base.performFlush(explicitTimeout: nil,
                             metrics: exporterMetrics) { signals in
       makeMetricExportRequest(signals)
     }
+  }
+
+  // MARK: Shutdown
+
+  public func shutdown() -> ExportResult {
+    return .success
   }
 
   public func shutdown() async -> ExportResult {

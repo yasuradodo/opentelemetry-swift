@@ -74,6 +74,8 @@ public final class OtlpHttpTraceExporter: SpanExporter, @unchecked Sendable {
 
   // MARK: - SpanExporter
 
+  // MARK: Export
+
   public func export(spans: [SpanData], explicitTimeout: TimeInterval? = nil)
     -> SpanExporterResultCode {
     var resultValue: SpanExporterResultCode = .success
@@ -104,6 +106,23 @@ public final class OtlpHttpTraceExporter: SpanExporter, @unchecked Sendable {
     }
     return resultValue
   }
+
+  public func export(spans: [SpanData], explicitTimeout: TimeInterval? = nil) async
+    -> SpanExporterResultCode {
+    switch await base.performExport(adding: spans,
+                                    explicitTimeout: explicitTimeout,
+                                    metrics: exporterMetrics,
+                                    makeRequest: { signals in
+      makeTraceExportRequest(signals, explicitTimeout: explicitTimeout)
+    }) {
+    case .success:
+      return .success
+    case .failure:
+      return .failure
+    }
+  }
+
+  // MARK: Flush
 
   public func flush(explicitTimeout: TimeInterval? = nil)
     -> SpanExporterResultCode {
@@ -137,23 +156,6 @@ public final class OtlpHttpTraceExporter: SpanExporter, @unchecked Sendable {
     return resultValue
   }
 
-  public func shutdown(explicitTimeout: TimeInterval? = nil) {}
-
-  public func export(spans: [SpanData], explicitTimeout: TimeInterval? = nil) async
-    -> SpanExporterResultCode {
-    switch await base.performExport(adding: spans,
-                                    explicitTimeout: explicitTimeout,
-                                    metrics: exporterMetrics,
-                                    makeRequest: { signals in
-      makeTraceExportRequest(signals, explicitTimeout: explicitTimeout)
-    }) {
-    case .success:
-      return .success
-    case .failure:
-      return .failure
-    }
-  }
-
   public func flush(explicitTimeout: TimeInterval? = nil) async -> SpanExporterResultCode {
     switch await base.performFlush(explicitTimeout: explicitTimeout,
                                    metrics: exporterMetrics,
@@ -166,6 +168,10 @@ public final class OtlpHttpTraceExporter: SpanExporter, @unchecked Sendable {
       return .failure
     }
   }
+
+  // MARK: Shutdown
+
+  public func shutdown(explicitTimeout: TimeInterval? = nil) {}
 
   public func shutdown(explicitTimeout: TimeInterval?) async {}
 
