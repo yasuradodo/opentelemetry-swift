@@ -105,18 +105,14 @@ public final class OtlpHttpMetricExporter: MetricExporter, @unchecked Sendable {
                                         : ExporterMetrics.TransporterType.grpc)
   }
 
-  // MARK: - StableMetricsExporter
+  // MARK: - MetricExporter
+
+  // MARK: Export
 
   public func export(metrics: [MetricData]) -> ExportResult {
     let sendingMetrics = base.drainPending(adding: metrics)
-    let body =
-      Opentelemetry_Proto_Collector_Metrics_V1_ExportMetricsServiceRequest.with {
-        $0.resourceMetrics = MetricsAdapter.toProtoResourceMetrics(
-          metricData: sendingMetrics)
-      }
     exporterMetrics?.addSeen(value: sendingMetrics.count)
-    var request = base.createRequest(body: body, endpoint: base.endpoint)
-    request.timeoutInterval = min(TimeInterval.greatestFiniteMagnitude, base.config.timeout)
+    let request = makeMetricExportRequest(sendingMetrics)
     base.httpClient.send(request: request) { [weak self] result in
       switch result {
       case .success:
@@ -131,21 +127,24 @@ public final class OtlpHttpMetricExporter: MetricExporter, @unchecked Sendable {
     return .success
   }
 
+  public func export(metrics: [MetricData]) async -> ExportResult {
+    await base.performExport(adding: metrics,
+                             explicitTimeout: nil,
+                             metrics: exporterMetrics) { signals in
+      makeMetricExportRequest(signals)
+    }
+  }
+
+  // MARK: Flush
+
   public func flush() -> ExportResult {
     var exporterResult: ExportResult = .success
     let pendingMetrics = base.snapshotPending()
     if !pendingMetrics.isEmpty {
       let sentCount = pendingMetrics.count
-      let body =
-        Opentelemetry_Proto_Collector_Metrics_V1_ExportMetricsServiceRequest
-          .with {
-            $0.resourceMetrics = MetricsAdapter.toProtoResourceMetrics(
-              metricData: pendingMetrics)
-          }
       let semaphore = DispatchSemaphore(value: 0)
-      var request = base.createRequest(body: body, endpoint: base.endpoint)
-      let timeout = min(TimeInterval.greatestFiniteMagnitude, base.config.timeout)
-      request.timeoutInterval = timeout
+      let request = makeMetricExportRequest(pendingMetrics)
+      let timeout = request.timeoutInterval
       base.httpClient.send(request: request) { [weak self] result in
         switch result {
         case .success:
@@ -169,8 +168,21 @@ public final class OtlpHttpMetricExporter: MetricExporter, @unchecked Sendable {
     return exporterResult
   }
 
+  public func flush() async -> ExportResult {
+    await base.performFlush(explicitTimeout: nil,
+                            metrics: exporterMetrics) { signals in
+      makeMetricExportRequest(signals)
+    }
+  }
+
+  // MARK: Shutdown
+
   public func shutdown() -> ExportResult {
     return .success
+  }
+
+  public func shutdown() async -> ExportResult {
+    .success
   }
 
   // MARK: - AggregationTemporalitySelectorProtocol
@@ -188,5 +200,17 @@ public final class OtlpHttpMetricExporter: MetricExporter, @unchecked Sendable {
     for instrument: OpenTelemetrySdk.InstrumentType
   ) -> OpenTelemetrySdk.Aggregation {
     return defaultAggregationSelector.getDefaultAggregation(for: instrument)
+  }
+
+  // MARK: - Private
+
+  private func makeMetricExportRequest(_ metrics: [MetricData]) -> URLRequest {
+    let body =
+      Opentelemetry_Proto_Collector_Metrics_V1_ExportMetricsServiceRequest.with {
+        $0.resourceMetrics = MetricsAdapter.toProtoResourceMetrics(metricData: metrics)
+      }
+    var request = base.createRequest(body: body, endpoint: base.endpoint)
+    request.timeoutInterval = base.exportTimeout(explicitTimeout: nil)
+    return request
   }
 }

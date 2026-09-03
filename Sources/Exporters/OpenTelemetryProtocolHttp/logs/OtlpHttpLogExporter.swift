@@ -20,6 +20,8 @@ public final class OtlpHttpLogExporter: LogRecordExporter, @unchecked Sendable {
   private let base: OtlpHttpExporterBase<ReadableLogRecord>
   private var exporterMetrics: ExporterMetrics?
 
+  // MARK: - Init
+
   init(base: OtlpHttpExporterBase<ReadableLogRecord>) {
     self.base = base
   }
@@ -70,19 +72,16 @@ public final class OtlpHttpLogExporter: LogRecordExporter, @unchecked Sendable {
                                         : ExporterMetrics.TransporterType.grpc)
   }
 
+  // MARK: - LogRecordExporter
+
+  // MARK: Export
+
   public func export(logRecords: [OpenTelemetrySdk.ReadableLogRecord],
                      explicitTimeout: TimeInterval? = nil) -> OpenTelemetrySdk.ExportResult {
     let sendingLogRecords = base.drainPending(adding: logRecords)
 
-    let body =
-      Opentelemetry_Proto_Collector_Logs_V1_ExportLogsServiceRequest.with { request in
-        request.resourceLogs = LogRecordAdapter.toProtoResourceRecordLog(
-          logRecordList: sendingLogRecords)
-      }
-
-    var request = base.createRequest(body: body, endpoint: base.endpoint)
     exporterMetrics?.addSeen(value: sendingLogRecords.count)
-    request.timeoutInterval = min(explicitTimeout ?? TimeInterval.greatestFiniteMagnitude, base.config.timeout)
+    let request = makeLogExportRequest(sendingLogRecords, explicitTimeout: explicitTimeout)
     base.httpClient.send(request: request) { [weak self] result in
       switch result {
       case .success:
@@ -97,9 +96,22 @@ public final class OtlpHttpLogExporter: LogRecordExporter, @unchecked Sendable {
     return .success
   }
 
-  public func forceFlush(explicitTimeout: TimeInterval? = nil) -> ExportResult {
-    flush(explicitTimeout: explicitTimeout)
+  public func export(logRecords: [OpenTelemetrySdk.ReadableLogRecord],
+                     explicitTimeout: TimeInterval? = nil) async -> OpenTelemetrySdk.ExportResult {
+    await base.performExport(adding: logRecords,
+                             explicitTimeout: explicitTimeout,
+                             metrics: exporterMetrics) { signals in
+      makeLogExportRequest(signals, explicitTimeout: explicitTimeout)
+    }
   }
+
+  // MARK: Shutdown
+
+  public func shutdown(explicitTimeout: TimeInterval? = nil) {}
+
+  public func shutdown(explicitTimeout: TimeInterval?) async {}
+
+  // MARK: Force flush
 
   public func flush(explicitTimeout: TimeInterval? = nil) -> ExportResult {
     var exporterResult: ExportResult = .success
@@ -107,15 +119,9 @@ public final class OtlpHttpLogExporter: LogRecordExporter, @unchecked Sendable {
 
     if !pendingLogRecords.isEmpty {
       let sentCount = pendingLogRecords.count
-      let body =
-        Opentelemetry_Proto_Collector_Logs_V1_ExportLogsServiceRequest.with { request in
-          request.resourceLogs = LogRecordAdapter.toProtoResourceRecordLog(
-            logRecordList: pendingLogRecords)
-        }
       let semaphore = DispatchSemaphore(value: 0)
-      var request = base.createRequest(body: body, endpoint: base.endpoint)
-      let timeout = min(explicitTimeout ?? TimeInterval.greatestFiniteMagnitude, base.config.timeout)
-      request.timeoutInterval = timeout
+      let request = makeLogExportRequest(pendingLogRecords, explicitTimeout: explicitTimeout)
+      let timeout = request.timeoutInterval
       base.httpClient.send(request: request) { [weak self] result in
         switch result {
         case .success:
@@ -140,5 +146,32 @@ public final class OtlpHttpLogExporter: LogRecordExporter, @unchecked Sendable {
     return exporterResult
   }
 
-  public func shutdown(explicitTimeout: TimeInterval? = nil) {}
+  public func forceFlush(explicitTimeout: TimeInterval? = nil) -> ExportResult {
+    flush(explicitTimeout: explicitTimeout)
+  }
+
+  public func flush(explicitTimeout: TimeInterval? = nil) async -> ExportResult {
+    await base.performFlush(explicitTimeout: explicitTimeout,
+                            metrics: exporterMetrics) { signals in
+      makeLogExportRequest(signals, explicitTimeout: explicitTimeout)
+    }
+  }
+
+  public func forceFlush(explicitTimeout: TimeInterval? = nil) async -> ExportResult {
+    await flush(explicitTimeout: explicitTimeout)
+  }
+
+  // MARK: - Private
+
+  private func makeLogExportRequest(_ logRecords: [ReadableLogRecord],
+                                    explicitTimeout: TimeInterval?) -> URLRequest {
+    let body =
+      Opentelemetry_Proto_Collector_Logs_V1_ExportLogsServiceRequest.with { request in
+        request.resourceLogs = LogRecordAdapter.toProtoResourceRecordLog(
+          logRecordList: logRecords)
+      }
+    var request = base.createRequest(body: body, endpoint: base.endpoint)
+    request.timeoutInterval = base.exportTimeout(explicitTimeout: explicitTimeout)
+    return request
+  }
 }
